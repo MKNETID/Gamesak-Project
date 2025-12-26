@@ -1,0 +1,46 @@
+name: Update Branch Manifest
+
+on:
+  schedule:
+    # Menjalankan setiap jam (menit ke-0)
+    - cron: '0 * * * *'
+  workflow_dispatch: # Memungkinkan kamu menjalankan manual untuk testing
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Diperlukan untuk push kembali ke repo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Mengambil semua history agar semua branch terbaca
+
+      - name: Generate data-manifest.json
+        run: |
+          # Ambil daftar branch remote, hapus 'origin/', dan bersihkan spasi
+          BRANCHES=$(git branch -r | grep -v 'origin/HEAD' | sed 's/origin\///' | sed 's/^[[:space:]]*//')
+          
+          # Hitung total branch
+          TOTAL=$(echo "$BRANCHES" | wc -l)
+          
+          # Ubah daftar branch menjadi format array JSON menggunakan jq
+          BRANCH_ARRAY=$(echo "$BRANCHES" | jq -R . | jq -s .)
+          
+          # Susun file JSON
+          echo "{
+            \"total_branches\": $TOTAL,
+            \"branches\": $BRANCH_ARRAY,
+            \"last_updated\": \"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\"
+          }" > data-manifest.json
+
+      - name: Commit and Push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add data-manifest.json
+          # Hanya commit jika ada perubahan untuk menghindari error
+          git diff-index --quiet HEAD || git commit -m "Update data-manifest.json [skip ci]"
+          git push
