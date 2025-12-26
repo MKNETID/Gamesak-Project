@@ -1,0 +1,91 @@
+name: Create Orphan Branches from External Lua
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * *' # Berjalan setiap hari jam 09:00 WIB
+
+jobs:
+  sync-to-branches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Gamesak-Project
+        uses: actions/checkout@v4
+        with:
+          repository: MKNETID/Gamesak-Project
+          token: ${{ secrets.API_TOKEN }}
+          path: gamesak-project
+
+      - name: Process External Repos
+        env:
+          MY_TOKEN: ${{ secrets.API_TOKEN }}
+        run: |
+          cd gamesak-project
+          
+          # Ambil daftar yang sudah terdata di data-manifest.json
+          # Diasumsikan format JSON sama seperti sebelumnya
+          jq -r '.files[]' data-manifest.json > existing_list.txt
+
+          SOURCES=("SteamAutoCracks/ManifestHub" "dvahana2424-web/sojogamesdatabase1")
+
+          for REPO in "${SOURCES[@]}"; do
+            echo "Checking: $REPO"
+            
+            # Ambil daftar branch dari sumber
+            BRANCHES=$(curl -s -H "Authorization: token $MY_TOKEN" \
+              "https://api.github.com/repos/$REPO/branches?per_page=100" | jq -r '.[].name')
+
+            for BRANCH_NAME in $BRANCHES; do
+              # Cek apakah branch sudah ada di manifest atau sudah ada di repo kita
+              if grep -qxF "$BRANCH_NAME" existing_list.txt; then
+                continue
+              fi
+
+              echo "Found New: $BRANCH_NAME. Downloading .lua..."
+              
+              LUA_URL="https://raw.githubusercontent.com/$REPO/$BRANCH_NAME/${BRANCH_NAME}.lua"
+              HTTP_STATUS=$(curl -o "temp.lua" -s -L -w "%{http_code}" -H "Authorization: token $MY_TOKEN" "$LUA_URL")
+
+              if [ "$HTTP_STATUS" -eq "200" ]; then
+                # Simpan state saat ini
+                git checkout main
+                
+                # Buat Orphan Branch baru (tanpa riwayat main)
+                git checkout --orphan "$BRANCH_NAME"
+                
+                # Hapus semua file dari main yang terbawa di stage
+                git rm -rf .
+                
+                # Masukkan file lua dan beri nama sesuai branch
+                mv temp.lua "${BRANCH_NAME}.lua"
+                
+                # Commit dan Push branch baru
+                git config --local user.email "action@github.com"
+                git config --local user.name "GitHub Action"
+                git add "${BRANCH_NAME}.lua"
+                git commit -m "Add lua for $BRANCH_NAME"
+                git push origin "$BRANCH_NAME"
+                
+                # Kembali ke main untuk update manifest.json
+                git checkout main
+                jq --arg new "$BRANCH_NAME" '.files += [$new]' data-manifest.json > tmp.json && mv tmp.json data-manifest.json
+                
+                echo "Successfully created branch $BRANCH_NAME"
+              else
+                echo "Skipped $BRANCH_NAME (Lua not found)"
+                rm -f temp.lua
+              fi
+            done
+          done
+
+      - name: Update Manifest and Push
+        run: |
+          cd gamesak-project
+          git checkout main
+          # Update total count
+          NEW_TOTAL=$(jq '.files | length' data-manifest.json)
+          jq --arg total "$NEW_TOTAL" '.total = ($total | tonumber)' data-manifest.json > tmp.json && mv tmp.json data-manifest.json
+          
+          git add data-manifest.json
+          git commit -m "Update manifest: $NEW_TOTAL files" || exit 0
+          git push origin main
