@@ -1,4 +1,4 @@
-name: Create Orphan Branches from External Lua
+name: Create Orphan Branches (Unlimited Sync)
 
 on:
   workflow_dispatch:
@@ -17,63 +17,78 @@ jobs:
           path: gamesak-project
           fetch-depth: 0
 
-      - name: Process External Repos
+      - name: Process External Repos (Unlimited Pagination)
         env:
           MY_TOKEN: ${{ secrets.API_TOKEN }}
         run: |
           cd gamesak-project
           
-          # Gunakan nama key sesuai JSON Anda: .branches
+          # Pastikan file ada
+          if [ ! -f data-manifest.json ]; then echo '{"total_branches":0,"branches":[]}' > data-manifest.json; fi
+          
+          # Ambil daftar yang sudah ada
           jq -r '.branches[]?' data-manifest.json > existing_list.txt
 
           SOURCES=("SteamAutoCracks/ManifestHub" "dvahana2424-web/sojogamesdatabase1")
 
           for REPO in "${SOURCES[@]}"; do
-            echo "Checking: $REPO"
+            echo "------------------------------------------"
+            echo "Searching all branches in: $REPO"
             
-            # Ambil daftar branch (limit 100 per repo per jalan)
-            BRANCHES=$(curl -s -H "Authorization: token $MY_TOKEN" \
-              "https://api.github.com/repos/$REPO/branches?per_page=100" | jq -r '.[].name')
-
-            for BRANCH_NAME in $BRANCHES; do
-              # Validasi nama branch & cek duplikat
-              if [ "$BRANCH_NAME" == "main" ] || [ "$BRANCH_NAME" == "master" ] || grep -qxF "$BRANCH_NAME" existing_list.txt; then
-                continue
-              fi
-
-              echo "Found New: $BRANCH_NAME. Downloading .lua..."
+            PAGE=1
+            while : ; do
+              echo "Fetching page $PAGE..."
+              # Ambil 100 branch per halaman
+              URL="https://api.github.com/repos/$REPO/branches?per_page=100&page=$PAGE"
+              RESPONSE=$(curl -s -H "Authorization: token $MY_TOKEN" "$URL")
               
-              LUA_URL="https://raw.githubusercontent.com/$REPO/$BRANCH_NAME/${BRANCH_NAME}.lua"
-              HTTP_STATUS=$(curl -o "temp.lua" -s -L -w "%{http_code}" -H "Authorization: token $MY_TOKEN" "$LUA_URL")
-
-              if [ "$HTTP_STATUS" -eq "200" ]; then
-                LUA_CONTENT=$(cat temp.lua)
-                
-                # Buat Orphan Branch baru
-                git checkout --orphan "$BRANCH_NAME"
-                git rm -rf . > /dev/null 2>&1
-                
-                # Simpan file .lua
-                echo "$LUA_CONTENT" > "${BRANCH_NAME}.lua"
-                
-                git config --local user.email "action@github.com"
-                git config --local user.name "GitHub Action"
-                git add "${BRANCH_NAME}.lua"
-                git commit -m "Add lua for $BRANCH_NAME"
-                git push origin "$BRANCH_NAME"
-                
-                # Kembali ke main untuk update manifest
-                git checkout main
-                # Gunakan key .branches sesuai struktur Anda
-                jq --arg new "$BRANCH_NAME" '.branches += [$new]' data-manifest.json > tmp.json && mv tmp.json data-manifest.json
-                
-                # Masukkan ke list pencarian agar tidak diproses ulang jika ada di repo sumber berbeda
-                echo "$BRANCH_NAME" >> existing_list.txt
-                echo "Successfully created branch: $BRANCH_NAME"
-              else
-                echo "Skipped $BRANCH_NAME (Lua not found or HTTP $HTTP_STATUS)"
+              # Cek jika response kosong atau bukan array
+              COUNT=$(echo "$RESPONSE" | jq '. | length')
+              if [ "$COUNT" -eq "0" ] || [ "$RESPONSE" == "[]" ] || [ -z "$COUNT" ]; then
+                echo "No more branches found in $REPO."
+                break
               fi
-              rm -f temp.lua
+
+              # Ambil nama branch dari halaman ini
+              BRANCHES=$(echo "$RESPONSE" | jq -r '.[].name')
+
+              for BRANCH_NAME in $BRANCHES; do
+                # Filter: lewati main/master dan yang sudah ada di manifest
+                if [[ "$BRANCH_NAME" == "main" || "$BRANCH_NAME" == "master" ]] || grep -qxF "$BRANCH_NAME" existing_list.txt; then
+                  continue
+                fi
+
+                echo "New Branch Found: $BRANCH_NAME. Downloading .lua..."
+                
+                LUA_URL="https://raw.githubusercontent.com/$REPO/$BRANCH_NAME/${BRANCH_NAME}.lua"
+                HTTP_STATUS=$(curl -o "temp.lua" -s -L -w "%{http_code}" -H "Authorization: token $MY_TOKEN" "$LUA_URL")
+
+                if [ "$HTTP_STATUS" -eq "200" ]; then
+                  LUA_CONTENT=$(cat temp.lua)
+                  
+                  # Proses pembuatan Orphan Branch
+                  git checkout --orphan "$BRANCH_NAME"
+                  git rm -rf . > /dev/null 2>&1
+                  echo "$LUA_CONTENT" > "${BRANCH_NAME}.lua"
+                  
+                  git config --local user.email "action@github.com"
+                  git config --local user.name "github-actions[bot]"
+                  git add "${BRANCH_NAME}.lua"
+                  git commit -m "Add lua for $BRANCH_NAME"
+                  git push origin "$BRANCH_NAME"
+                  
+                  # Update manifest di main
+                  git checkout main
+                  jq --arg new "$BRANCH_NAME" '.branches += [$new]' data-manifest.json > tmp.json && mv tmp.json data-manifest.json
+                  echo "$BRANCH_NAME" >> existing_list.txt
+                else
+                  echo "Skipped: ${BRANCH_NAME}.lua not found."
+                fi
+                rm -f temp.lua
+              done
+              
+              # Lanjut ke halaman berikutnya
+              ((PAGE++))
             done
           done
 
@@ -81,12 +96,11 @@ jobs:
         run: |
           cd gamesak-project
           git checkout main
+          # Sort unik dan hitung total akhir
+          jq '.branches |= (unique | sort) | .total_branches = (.branches | length)' data-manifest.json > tmp.json && mv tmp.json data-manifest.json
           
-          # Update total_branches dan urutkan list branches secara alfabetis
-          jq '.branches |= sort | .total_branches = (.branches | length)' data-manifest.json > tmp.json && mv tmp.json data-manifest.json
-          
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          git config --local user.email "github-actions[bot]"
+          git config --local user.name "github-actions[bot]"
           git add data-manifest.json
-          git commit -m "Update manifest: $(jq '.total_branches' data-manifest.json) branches" || exit 0
+          git commit -m "Sync complete: $(jq '.total_branches' data-manifest.json) total branches" || exit 0
           git push origin main
